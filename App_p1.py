@@ -5,20 +5,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Any
 
 from pypdf import PdfReader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.chains import ConversationalRetrievalChain
 
+# Backends: add new keys here and in get_embeddings / get_llm / get_faiss_dir
+BACKEND_OPENAI = "openai"
+BACKEND_LLAMA = "llama"
+BACKENDS = (BACKEND_OPENAI, BACKEND_LLAMA)
 
 PDF_DIR = os.environ.get("ADS_PDF_DIR", os.path.join("data", "pdfs"))
-FAISS_INDEX_DIR = os.environ.get("ADS_FAISS_INDEX_DIR", "faiss_index")
+FAISS_INDEX_DIR_OPENAI = os.environ.get("ADS_FAISS_INDEX_DIR", "faiss_index")
+FAISS_INDEX_DIR_LLAMA = os.environ.get("ADS_FAISS_INDEX_DIR_LLAMA", "faiss_index_llama")
+LLAMA_MODEL_PATH = os.environ.get("ADS_LLAMA_MODEL_PATH", os.path.join("models", "llama-7b.ggmlv3.q4_1.bin"))
+EMBEDDING_MODEL_MINILM = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 @dataclass
@@ -85,19 +91,60 @@ def make_chunks(
     return chunks
 
 
-def build_openai_vector_store(chunks: List[Document]) -> FAISS:
-    """Build FAISS index from chunks and save to FAISS_INDEX_DIR."""
-    embeddings = OpenAIEmbeddings()
+def get_embeddings(backend: str) -> Any:
+    """Return the embedding model for the given backend."""
+    if backend == BACKEND_OPENAI:
+        from langchain_openai import OpenAIEmbeddings
+        return OpenAIEmbeddings()
+    if backend == BACKEND_LLAMA:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_MINILM)
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+def get_faiss_index_dir(backend: str) -> str:
+    """Return the FAISS index directory for the given backend."""
+    if backend == BACKEND_OPENAI:
+        return FAISS_INDEX_DIR_OPENAI
+    if backend == BACKEND_LLAMA:
+        return FAISS_INDEX_DIR_LLAMA
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+def get_llm(backend: str) -> Any:
+    """Return the LLM for the given backend."""
+    if backend == BACKEND_OPENAI:
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI()
+    if backend == BACKEND_LLAMA:
+        from langchain_community.llms import LlamaCpp
+        path = os.path.abspath(LLAMA_MODEL_PATH)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"Llama model not found at {path}. "
+                "Download a GGML model and set ADS_LLAMA_MODEL_PATH or place it in models/."
+            )
+        return LlamaCpp(
+            model_path=path,
+            n_ctx=4096,
+            n_batch=256,
+            max_tokens=512,
+            verbose=False,
+        )
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+def build_vector_store(chunks: List[Document], embeddings: Any, index_dir: str) -> FAISS:
+    """Build FAISS index from chunks and save to index_dir."""
     store = FAISS.from_documents(documents=chunks, embedding=embeddings)
-    store.save_local(FAISS_INDEX_DIR)
+    store.save_local(index_dir)
     return store
 
 
-def load_openai_vector_store() -> FAISS:
-    """Load existing FAISS index from FAISS_INDEX_DIR."""
-    embeddings = OpenAIEmbeddings()
+def load_vector_store(embeddings: Any, index_dir: str) -> FAISS:
+    """Load existing FAISS index from index_dir."""
     store = FAISS.load_local(
-        FAISS_INDEX_DIR,
+        index_dir,
         embeddings,
         allow_dangerous_deserialization=True,
     )
@@ -109,7 +156,7 @@ QA_PROMPT_TEMPLATE = """You are a helpful assistant that answers questions based
 Rules:
 - Answer the question using only the provided context.
 - If the answer is not in the context, say "I couldn't find this in the provided materials"
-- Do not use outside knowledge or refer to "the book" vaguel, the context below IS the book content.
+- Do not use outside knowledge or refer to "the book" vaguely; the context below IS the book content.
 
 Context from the materials:
 {context}
@@ -119,18 +166,18 @@ Question: {question}
 Answer based only on the context above:"""
 
 
-def create_openai_conversation_chain(store: FAISS) -> ConversationalRetrievalChain:
-    """Build retrieval chain with OpenAI LLM and chat memory."""
+def create_conversation_chain(store: FAISS, llm: Any) -> ConversationalRetrievalChain:
+    """Build retrieval chain with the given store and LLM."""
     qa_prompt = PromptTemplate(
         template=QA_PROMPT_TEMPLATE,
         input_variables=["context", "question"],
     )
-    llm = ChatOpenAI()
     memory = ConversationBufferMemory(
         memory_key="chat_history",
         return_messages=True,
     )
-    retriever = store.as_retriever(search_kwargs={"k": 4})
+    # Use a small k to keep the combined prompt within the model context window.
+    retriever = store.as_retriever(search_kwargs={"k": 2})
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
@@ -140,31 +187,45 @@ def create_openai_conversation_chain(store: FAISS) -> ConversationalRetrievalCha
     return chain
 
 
+def get_backend() -> str:
+    """Resolve backend from env or prompt (openai | llama)."""
+    env_backend = os.environ.get("ADS_LLM_BACKEND", "").strip().lower()
+    if env_backend in BACKENDS:
+        return env_backend
+    prompt = f"Choose backend: 1) OpenAI  2) Llama (local) [1/2, default 1]: "
+    choice = input(prompt).strip() or "1"
+    return BACKEND_LLAMA if choice == "2" else BACKEND_OPENAI
+
+
 def main() -> None:
-    if os.path.isdir(FAISS_INDEX_DIR):
-        store = load_openai_vector_store()
-        print("Loaded existing FAISS index.")
+    backend = get_backend()
+    index_dir = get_faiss_index_dir(backend)
+    embeddings = get_embeddings(backend)
+
+    if os.path.isdir(index_dir):
+        store = load_vector_store(embeddings, index_dir)
+        print(f"Loaded existing FAISS index for {backend}.")
     else:
         records = load_pdfs()
         print(f"Loaded {len(records)} pages from PDFs in '{PDF_DIR}'.")
         chunks = make_chunks(records)
         print(f"Created {len(chunks)} text chunks.")
-        store = build_openai_vector_store(chunks)
-        print("Built and saved FAISS index.")
+        store = build_vector_store(chunks, embeddings, index_dir)
+        print(f"Built and saved FAISS index for {backend}.")
 
-    chain = create_openai_conversation_chain(store)
-    print("Type 'exit' to quit.")
+    llm = get_llm(backend)
+    chain = create_conversation_chain(store, llm)
+    print(f"Using backend: {backend}. Type 'exit' to quit.")
     while True:
         question = input("Ask a question (or 'exit'): ").strip()
         if question.lower() == "exit":
             break
         if not question:
             continue
-        result = chain({"question": question})
+        result = chain.invoke({"question": question})
         answer = result.get("answer") or result.get("result") or ""
         print(f"\nAnswer:\n{answer}\n")
 
 
 if __name__ == "__main__":
     main()
-
