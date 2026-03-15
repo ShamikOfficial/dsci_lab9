@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lab 9 Q&A Chatbot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <aside class="sidebar">
+      <h2>COOKIE Chat</h2>
+
+      <label for="backend">Choose Model</label>
+
+      <div class="custom-select" id="backendSelect">
+        <button type="button" class="custom-select-trigger" id="backendTrigger">
+          <span id="backendSelectedText">OpenAI</span>
+          <span class="custom-select-arrow">⌄</span>
+        </button>
+
+        <div class="custom-select-menu" id="backendMenu">
+          <div class="custom-select-option selected" data-value="openai">OpenAI</div>
+          <div class="custom-select-option" data-value="llama">Llama</div>
+        </div>
+      </div>
+
+      <label for="pdfs">Upload PDF document(s)</label>
+      <input type="file" id="pdfs" accept=".pdf" multiple />
+
+      <div id="fileList" class="file-list"></div>
+
+      <button id="analyzeBtn">Analyze PDFs</button>
+
+      <div id="statusMsg" class="status-msg"></div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="header">
+        <h1>Hi, what can I help you with?</h1>
+        <p>Ask questions based on the uploaded PDFs</p>
+      </header>
+
+      <section id="chatWindow" class="chat-window"></section>
+
+      <section class="input-bar">
+        <input
+          type="text"
+          id="questionInput"
+          placeholder="Type your question here..."
+        />
+        <button id="sendBtn" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 2L11 13"></path>
+            <path d="M22 2L15 22L11 13L2 9L22 2Z"></path>
+          </svg>
+        </button>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
