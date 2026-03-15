@@ -9,3 +9,4 @@ openai
 python-dotenv
 llama-cpp-python
 sentence-transformers
+flask
