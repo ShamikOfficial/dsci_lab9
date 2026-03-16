@@ -1,46 +1,113 @@
-const analyzeBtn = document.getElementById("analyzeBtn");
 const sendBtn = document.getElementById("sendBtn");
-const pdfInput = document.getElementById("pdfs");
 const questionInput = document.getElementById("questionInput");
 const chatWindow = document.getElementById("chatWindow");
-const statusMsg = document.getElementById("statusMsg");
-const fileList = document.getElementById("fileList");
-
-/* backend select */
-const backendSelect = document.getElementById("backendSelect");
+const modelLoadingOverlay = document.getElementById("modelLoadingOverlay");
+const thinkingIndicator = document.getElementById("thinkingIndicator");
 const backendTrigger = document.getElementById("backendTrigger");
-const backendMenu = document.getElementById("backendMenu");
+const backendSelect = document.getElementById("backendSelect");
 const backendSelectedText = document.getElementById("backendSelectedText");
-const backendOptions = document.querySelectorAll(".custom-select-option");
+const backendMenu = document.getElementById("backendMenu");
 
-/* avatars */
 const userAvatar =
   "https://upload.wikimedia.org/wikipedia/commons/9/99/Sample_User_Icon.png";
 const botAvatar =
   "https://upload.wikimedia.org/wikipedia/commons/0/0c/Chatbot_img.png";
 
-/* state */
 let chatHistory = [];
 let selectedBackend = "openai";
+let backendOptions = []; // { id, label }
+let isLoadingModel = false;
 
-/* select */
-if (backendTrigger) {
-  backendTrigger.addEventListener("click", () => {
-    backendSelect.classList.toggle("open");
+async function fetchBackends() {
+  const response = await fetch("/backends");
+  const data = await response.json();
+  return data;
+}
+
+function buildBackendMenu(options, defaultId) {
+  if (!backendMenu) return;
+  backendMenu.innerHTML = "";
+  options.forEach((opt) => {
+    const div = document.createElement("div");
+    div.className = "custom-select-option" + (opt.id === defaultId ? " selected" : "");
+    div.dataset.value = opt.id;
+    div.textContent = opt.label;
+    backendMenu.appendChild(div);
+  });
+  backendOptions = document.querySelectorAll(".custom-select-option");
+  attachBackendListeners();
+}
+
+function attachBackendListeners() {
+  backendOptions.forEach((option) => {
+    option.addEventListener("click", async () => {
+      const backend = option.dataset.value;
+      const label = option.textContent.trim();
+
+      if (backend === selectedBackend) {
+        backendSelect.classList.remove("open");
+        return;
+      }
+
+      if (backend !== "openai") {
+        const result = await ensureBackendLoaded(backend);
+        if (result !== true) {
+          addMessage("bot", `Could not load model: ${result}`);
+          backendSelect.classList.remove("open");
+          return;
+        }
+      }
+
+      backendOptions.forEach((opt) => opt.classList.remove("selected"));
+      option.classList.add("selected");
+      selectedBackend = backend;
+      backendSelectedText.textContent = label;
+      backendSelect.classList.remove("open");
+    });
   });
 }
 
-backendOptions.forEach((option) => {
-  option.addEventListener("click", () => {
-    backendOptions.forEach((opt) => opt.classList.remove("selected"));
-    option.classList.add("selected");
+function showModelLoading(show) {
+  isLoadingModel = show;
+  backendTrigger.disabled = show;
+  if (modelLoadingOverlay) {
+    modelLoadingOverlay.setAttribute("aria-hidden", !show);
+    modelLoadingOverlay.classList.toggle("show", show);
+  }
+}
 
-    selectedBackend = option.dataset.value;
-    backendSelectedText.textContent = option.textContent.trim();
+function showThinking(show) {
+  if (thinkingIndicator) {
+    thinkingIndicator.setAttribute("aria-hidden", !show);
+    thinkingIndicator.classList.toggle("show", show);
+  }
+}
 
-    backendSelect.classList.remove("open");
+async function ensureBackendLoaded(backend) {
+  if (backend === "openai") return true;
+  showModelLoading(true);
+  try {
+    const response = await fetch("/load_backend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backend: backend }),
+    });
+    const data = await response.json();
+    if (data.success) return true;
+    return data.error || "Failed to load model";
+  } catch (err) {
+    return err.message || "Network error";
+  } finally {
+    showModelLoading(false);
+  }
+}
+
+if (backendTrigger) {
+  backendTrigger.addEventListener("click", () => {
+    if (isLoadingModel) return;
+    backendSelect.classList.toggle("open");
   });
-});
+}
 
 document.addEventListener("click", (e) => {
   if (backendSelect && !backendSelect.contains(e.target)) {
@@ -48,7 +115,6 @@ document.addEventListener("click", (e) => {
   }
 });
 
-/* helpers */
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -57,7 +123,6 @@ function escapeHtml(text) {
 
 function createMessageHTML(sender, text) {
   const avatar = sender === "user" ? userAvatar : botAvatar;
-
   return `
     <div class="chat-message ${sender}">
       <div class="avatar">
@@ -81,116 +146,30 @@ function addMessage(sender, text) {
   renderChatHistory();
 }
 
-function showStatus(text) {
-  if (!text || !text.trim()) {
-    hideStatus();
-    return;
-  }
-  statusMsg.textContent = text;
-  statusMsg.classList.add("show");
-}
-
-function hideStatus() {
-  statusMsg.textContent = "";
-  statusMsg.classList.remove("show");
-}
-
-function showFileList(html) {
-  if (!html || !html.trim()) {
-    hideFileList();
-    return;
-  }
-  fileList.innerHTML = html;
-  fileList.classList.add("show");
-}
-
-function hideFileList() {
-  fileList.innerHTML = "";
-  fileList.classList.remove("show");
-}
-
-/* file upload */
-pdfInput.addEventListener("change", () => {
-  const files = pdfInput.files;
-
-  if (!files || !files.length) {
-    hideFileList();
-    hideStatus();
-    return;
-  }
-
-  let html = "<strong>Selected files:</strong><br>";
-  for (const file of files) {
-    html += `• ${escapeHtml(file.name)}<br>`;
-  }
-
-  showFileList(html);
-  hideStatus();
-});
-
-/* analyze PDFs */
-analyzeBtn.addEventListener("click", async () => {
-  const files = pdfInput.files;
-  const backend = selectedBackend;
-
-  if (!files || !files.length) {
-    hideFileList();
-    hideStatus();
-    return;
-  }
-
-  const formData = new FormData();
-  formData.append("backend", backend);
-
-  for (const file of files) {
-    formData.append("pdfs", file);
-  }
-
-  showStatus("Analyzing PDFs... Please wait.");
-
-  try {
-    const response = await fetch("/analyze", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await response.json();
-
-    if (data.success) {
-      showStatus(data.message);
-      chatHistory = [];
-      addMessage(
-        "bot",
-        "PDFs processed successfully. You can start asking questions now."
-      );
-    } else {
-      showStatus(`Error: ${data.error}`);
-    }
-  } catch (error) {
-    showStatus(`Error: ${error.message}`);
-  }
-});
-
-/* ask question */
 async function sendQuestion() {
   const question = questionInput.value.trim();
   const backend = selectedBackend;
 
   if (!question) return;
 
+  if (backend !== "openai") {
+    const loaded = await ensureBackendLoaded(backend);
+    if (loaded !== true) {
+      addMessage("bot", `Error: ${loaded}`);
+      return;
+    }
+  }
+
   addMessage("user", question);
   questionInput.value = "";
+
+  showThinking(true);
 
   try {
     const response = await fetch("/ask", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        question: question,
-        backend: backend,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question, backend: backend }),
     });
 
     const data = await response.json();
@@ -202,13 +181,29 @@ async function sendQuestion() {
     }
   } catch (error) {
     addMessage("bot", `Error: ${error.message}`);
+  } finally {
+    showThinking(false);
   }
 }
 
 sendBtn.addEventListener("click", sendQuestion);
 
 questionInput.addEventListener("keypress", (event) => {
-  if (event.key === "Enter") {
-    sendQuestion();
-  }
+  if (event.key === "Enter") sendQuestion();
 });
+
+// Load backends and build dropdown on page load
+(async () => {
+  try {
+    const data = await fetchBackends();
+    const options = data.backends || [];
+    const defaultId = data.default || "openai";
+    selectedBackend = defaultId;
+    const defaultOpt = options.find((o) => o.id === defaultId);
+    backendSelectedText.textContent = defaultOpt ? defaultOpt.label : "OpenAI";
+    buildBackendMenu(options, defaultId);
+  } catch (err) {
+    backendSelectedText.textContent = "OpenAI";
+    buildBackendMenu([{ id: "openai", label: "OpenAI" }], "openai");
+  }
+})();

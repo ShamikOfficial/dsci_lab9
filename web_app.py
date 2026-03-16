@@ -1,20 +1,14 @@
 import os
-import shutil
 
 from flask import Flask, render_template, request, jsonify
-from werkzeug.utils import secure_filename
 
 from App_p1 import (
     BACKEND_OPENAI,
-    BACKEND_LLAMA,
-    BACKENDS,
-    PDF_DIR,
+    DEFAULT_BACKEND,
+    get_backends,
     get_embeddings,
     get_faiss_index_dir,
     get_llm,
-    load_pdfs,
-    make_chunks,
-    build_vector_store,
     load_vector_store,
     create_conversation_chain,
 )
@@ -23,57 +17,34 @@ app = Flask(
     __name__,
     template_folder=".",
     static_folder=".",
-    static_url_path=""
+    static_url_path="",
 )
 
-ALLOWED_EXTENSIONS = {"pdf"}
-
-# in-memory conversation chains
-conversation_chains = {
-    BACKEND_OPENAI: None,
-    BACKEND_LLAMA: None,
-}
+# Chains loaded on demand; only OpenAI is loaded at startup by default
+conversation_chains: dict = {}
 
 
-def allowed_file(filename: str) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-def ensure_pdf_dir() -> None:
-    os.makedirs(PDF_DIR, exist_ok=True)
-
-
-def clear_pdf_dir() -> None:
-    ensure_pdf_dir()
-    for name in os.listdir(PDF_DIR):
-        path = os.path.join(PDF_DIR, name)
-        if os.path.isfile(path):
-            os.remove(path)
-
-
-def reset_index_dir(index_dir: str) -> None:
-    if os.path.isdir(index_dir):
-        shutil.rmtree(index_dir)
-
-
-def build_chain_for_backend(backend: str):
+def load_chain_for_backend(backend: str):
+    """Load the FAISS index and create the conversation chain. No PDF processing."""
     index_dir = get_faiss_index_dir(backend)
+    if not os.path.isdir(index_dir):
+        return None
     embeddings = get_embeddings(backend)
-
-    if os.path.isdir(index_dir):
-        store = load_vector_store(embeddings, index_dir)
-    else:
-        records = load_pdfs()
-        if not records:
-            raise ValueError("No readable text found in uploaded PDFs.")
-        chunks = make_chunks(records)
-        if not chunks:
-            raise ValueError("No chunks were created from the uploaded PDFs.")
-        store = build_vector_store(chunks, embeddings, index_dir)
-
+    store = load_vector_store(embeddings, index_dir)
     llm = get_llm(backend)
-    chain = create_conversation_chain(store, llm)
-    return chain
+    return create_conversation_chain(store, llm)
+
+
+def init_chains():
+    """Load only OpenAI at startup. Other models load on selection."""
+    try:
+        chain = load_chain_for_backend(BACKEND_OPENAI)
+        conversation_chains[BACKEND_OPENAI] = chain
+        if chain is not None:
+            print("Loaded OpenAI backend (default).")
+    except Exception as e:
+        print(f"Could not load OpenAI backend: {e}")
+        conversation_chains[BACKEND_OPENAI] = None
 
 
 @app.route("/")
@@ -81,36 +52,40 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    backend = request.form.get("backend", BACKEND_OPENAI).strip().lower()
+@app.route("/backends")
+def backends():
+    """Return list of models: OpenAI + each file in models/ by filename. Default is openai."""
+    backends_list = get_backends()
+    options = [
+        {"id": b, "label": "OpenAI" if b == BACKEND_OPENAI else b}
+        for b in backends_list
+    ]
+    return jsonify({"backends": options, "default": DEFAULT_BACKEND})
 
-    if backend not in BACKENDS:
+
+@app.route("/load_backend", methods=["POST"])
+def load_backend():
+    """Load a backend on demand. Returns immediately if already loaded."""
+    data = request.get_json() or {}
+    backend = (data.get("backend") or "").strip()
+
+    if backend not in get_backends():
         return jsonify({"success": False, "error": "Invalid backend"}), 400
 
-    files = request.files.getlist("pdfs")
-    if not files:
-        return jsonify({"success": False, "error": "No PDF files uploaded"}), 400
+    if conversation_chains.get(backend) is not None:
+        return jsonify({"success": True, "message": "Already loaded"})
 
     try:
-        clear_pdf_dir()
-
-        for file in files:
-            if file and allowed_file(file.filename):
-                filename = secure_filename(file.filename)
-                file.save(os.path.join(PDF_DIR, filename))
-
-        index_dir = get_faiss_index_dir(backend)
-        reset_index_dir(index_dir)
-
-        chain = build_chain_for_backend(backend)
+        chain = load_chain_for_backend(backend)
         conversation_chains[backend] = chain
-
-        return jsonify({
-            "success": True,
-            "message": f"PDFs processed successfully using {backend} backend."
-        })
+        if chain is None:
+            return jsonify({
+                "success": False,
+                "error": f"No pre-built index for '{backend}'. Build it first with: python App_p1.py",
+            }), 400
+        return jsonify({"success": True, "message": f"{backend} loaded"})
     except Exception as e:
+        conversation_chains[backend] = None
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -121,9 +96,9 @@ def ask():
         return jsonify({"success": False, "error": "Missing JSON body"}), 400
 
     question = data.get("question", "").strip()
-    backend = data.get("backend", BACKEND_OPENAI).strip().lower()
+    backend = (data.get("backend") or DEFAULT_BACKEND).strip()
 
-    if backend not in BACKENDS:
+    if backend not in get_backends():
         return jsonify({"success": False, "error": "Invalid backend"}), 400
 
     if not question:
@@ -131,7 +106,10 @@ def ask():
 
     chain = conversation_chains.get(backend)
     if chain is None:
-        return jsonify({"success": False, "error": "Please analyze PDFs first"}), 400
+        return jsonify({
+            "success": False,
+            "error": f"Model '{backend}' not loaded. Select it from the dropdown to load.",
+        }), 400
 
     try:
         result = chain.invoke({"question": question})
@@ -142,5 +120,5 @@ def ask():
 
 
 if __name__ == "__main__":
-    ensure_pdf_dir()
+    init_chains()
     app.run(debug=True)

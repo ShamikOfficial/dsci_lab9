@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from dataclasses import dataclass
-from typing import List, Any
+from typing import List, Any, Tuple
 
 from pypdf import PdfReader
 from langchain_text_splitters import CharacterTextSplitter
@@ -15,16 +15,16 @@ from langchain_community.vectorstores import FAISS
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_classic.chains import ConversationalRetrievalChain
 
-# Backends: add new keys here and in get_embeddings / get_llm / get_faiss_dir
 BACKEND_OPENAI = "openai"
-BACKEND_LLAMA = "llama"
-BACKENDS = (BACKEND_OPENAI, BACKEND_LLAMA)
+DEFAULT_BACKEND = "openai"
 
 PDF_DIR = os.environ.get("ADS_PDF_DIR", os.path.join("data", "pdfs"))
+MODELS_DIR = os.environ.get("ADS_MODELS_DIR", "models")
 FAISS_INDEX_DIR_OPENAI = os.environ.get("ADS_FAISS_INDEX_DIR", "faiss_index")
-FAISS_INDEX_DIR_LLAMA = os.environ.get("ADS_FAISS_INDEX_DIR_LLAMA", "faiss_index_llama")
-LLAMA_MODEL_PATH = os.environ.get("ADS_LLAMA_MODEL_PATH", os.path.join("models", "llama-7b.ggmlv3.q4_1.bin"))
+FAISS_INDEX_DIR_LOCAL = os.environ.get("ADS_FAISS_INDEX_DIR_LLAMA", "faiss_index_llama")
 EMBEDDING_MODEL_MINILM = "sentence-transformers/all-MiniLM-L6-v2"
+
+LLAMA_EXTENSIONS = (".gguf", ".bin", ".ggml")
 
 
 @dataclass
@@ -33,6 +33,28 @@ class PageRecord:
     page: int
     source: str
     text: str
+
+
+def get_local_model_files() -> List[Tuple[str, str]]:
+    """Return list of (filename, absolute_path) for model files in MODELS_DIR, sorted by name."""
+    models_dir = os.path.abspath(MODELS_DIR)
+    if not os.path.isdir(models_dir):
+        return []
+    out: List[Tuple[str, str]] = []
+    for name in sorted(os.listdir(models_dir)):
+        lower = name.lower()
+        if not any(lower.endswith(ext) for ext in LLAMA_EXTENSIONS):
+            continue
+        path = os.path.join(models_dir, name)
+        if os.path.isfile(path):
+            out.append((name, os.path.abspath(path)))
+    return out
+
+
+def get_backends() -> Tuple[str, ...]:
+    """Return (openai, model1.gguf, model2.gguf, ...) — OpenAI first, then each file in models/ by name."""
+    local = [fname for fname, _ in get_local_model_files()]
+    return (BACKEND_OPENAI,) + tuple(local)
 
 
 def load_pdfs(pdf_dir: str = PDF_DIR) -> List[PageRecord]:
@@ -96,19 +118,26 @@ def get_embeddings(backend: str) -> Any:
     if backend == BACKEND_OPENAI:
         from langchain_openai import OpenAIEmbeddings
         return OpenAIEmbeddings()
-    if backend == BACKEND_LLAMA:
-        from langchain_huggingface import HuggingFaceEmbeddings
-        return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_MINILM)
-    raise ValueError(f"Unknown backend: {backend}")
+    from langchain_huggingface import HuggingFaceEmbeddings
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_MINILM)
 
 
 def get_faiss_index_dir(backend: str) -> str:
     """Return the FAISS index directory for the given backend."""
     if backend == BACKEND_OPENAI:
         return FAISS_INDEX_DIR_OPENAI
-    if backend == BACKEND_LLAMA:
-        return FAISS_INDEX_DIR_LLAMA
-    raise ValueError(f"Unknown backend: {backend}")
+    return FAISS_INDEX_DIR_LOCAL
+
+
+def _get_local_model_path(backend: str) -> str:
+    """Resolve path for a local model (backend = filename). Only allows filenames from get_local_model_files()."""
+    allowed = {fname: path for fname, path in get_local_model_files()}
+    if backend not in allowed:
+        raise FileNotFoundError(
+            f"Model '{backend}' not found in {MODELS_DIR}. "
+            "Add a .gguf (or .bin) file to the models folder."
+        )
+    return allowed[backend]
 
 
 def get_llm(backend: str) -> Any:
@@ -116,22 +145,15 @@ def get_llm(backend: str) -> Any:
     if backend == BACKEND_OPENAI:
         from langchain_openai import ChatOpenAI
         return ChatOpenAI()
-    if backend == BACKEND_LLAMA:
-        from langchain_community.llms import LlamaCpp
-        path = os.path.abspath(LLAMA_MODEL_PATH)
-        if not os.path.isfile(path):
-            raise FileNotFoundError(
-                f"Llama model not found at {path}. "
-                "Download a GGML model and set ADS_LLAMA_MODEL_PATH or place it in models/."
-            )
-        return LlamaCpp(
-            model_path=path,
-            n_ctx=4096,
-            n_batch=256,
-            max_tokens=512,
-            verbose=False,
-        )
-    raise ValueError(f"Unknown backend: {backend}")
+    from langchain_community.llms import LlamaCpp
+    path = _get_local_model_path(backend)
+    return LlamaCpp(
+        model_path=path,
+        n_ctx=4096,
+        n_batch=256,
+        max_tokens=512,
+        verbose=False,
+    )
 
 
 def build_vector_store(chunks: List[Document], embeddings: Any, index_dir: str) -> FAISS:
@@ -176,7 +198,6 @@ def create_conversation_chain(store: FAISS, llm: Any) -> ConversationalRetrieval
         memory_key="chat_history",
         return_messages=True,
     )
-    # Use a small k to keep the combined prompt within the model context window.
     retriever = store.as_retriever(search_kwargs={"k": 2})
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
@@ -188,13 +209,23 @@ def create_conversation_chain(store: FAISS, llm: Any) -> ConversationalRetrieval
 
 
 def get_backend() -> str:
-    """Resolve backend from env or prompt (openai | llama)."""
-    env_backend = os.environ.get("ADS_LLM_BACKEND", "").strip().lower()
-    if env_backend in BACKENDS:
+    """Resolve backend from env or prompt. Default is OpenAI; others are model filenames."""
+    backends = get_backends()
+    env_backend = os.environ.get("ADS_LLM_BACKEND", "").strip()
+    if env_backend in backends:
         return env_backend
-    prompt = f"Choose backend: 1) OpenAI  2) Llama (local) [1/2, default 1]: "
-    choice = input(prompt).strip() or "1"
-    return BACKEND_LLAMA if choice == "2" else BACKEND_OPENAI
+    print("Choose backend:")
+    for i, b in enumerate(backends, 1):
+        label = "OpenAI" if b == BACKEND_OPENAI else b
+        print(f"  {i}) {label}")
+    choice = input(f" [1-{len(backends)}, default 1]: ").strip() or "1"
+    try:
+        idx = int(choice)
+        if 1 <= idx <= len(backends):
+            return backends[idx - 1]
+    except ValueError:
+        pass
+    return BACKEND_OPENAI
 
 
 def main() -> None:
@@ -215,7 +246,8 @@ def main() -> None:
 
     llm = get_llm(backend)
     chain = create_conversation_chain(store, llm)
-    print(f"Using backend: {backend}. Type 'exit' to quit.")
+    label = "OpenAI" if backend == BACKEND_OPENAI else backend
+    print(f"Using: {label}. Type 'exit' to quit.")
     while True:
         question = input("Ask a question (or 'exit'): ").strip()
         if question.lower() == "exit":
