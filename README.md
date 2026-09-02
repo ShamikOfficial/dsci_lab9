@@ -1,6 +1,25 @@
-# Lab 9: Q&A Chatbot (Backend)
+# RAG Textbook Q&A
 
-CLI chatbot that answers questions from the ADS textbook PDFs. **Default is OpenAI** (GPT + OpenAI embeddings). You can also use **local models**: put any GGUF (or `.bin`) file in the `models/` folder and it appears as an option by its **filename** (LlamaCpp + MiniLM embeddings).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python&logoColor=white)]()
+
+> Retrieval-augmented generation chatbot that answers questions from Applied Data Science textbook PDFs using OpenAI or local GGUF models.
+
+---
+
+## Problem
+
+Students and practitioners need quick, accurate answers from large textbook PDFs without manually searching hundreds of pages. A generic chatbot hallucinates; a RAG pipeline grounds answers in source material.
+
+## Solution
+
+CLI chatbot that ingests PDFs, chunks and embeds text into a FAISS index, and answers questions via OpenAI GPT (default) or local LlamaCpp models with MiniLM embeddings.
+
+## Tech Stack
+
+`Python` · `LangChain` · `FAISS` · `OpenAI` · `LlamaCpp` · `MiniLM`
+
+---
 
 ## Setup
 
@@ -30,7 +49,7 @@ CLI chatbot that answers questions from the ADS textbook PDFs. **Default is Open
   ```bash
   pip install llama-cpp-python
   ```
-- Put GGUF (or `.bin`) model files in the `models/` folder. Each file is listed by its **filename** (e.g. `llama-2-7b-chat.Q4_K_M.gguf`). No env path needed.
+- Put GGUF (or `.bin`) model files in the `models/` folder. Each file is listed by its **filename** (e.g. `llama-2-7b-chat.Q4_K_M.gguf`).
 
 ## Environment variables
 
@@ -49,23 +68,34 @@ CLI chatbot that answers questions from the ADS textbook PDFs. **Default is Open
 python App_p1.py
 ```
 
-- You are prompted to choose backend: **1) OpenAI** (default) or **2) …** one option per file in `models/` (by filename). Set `ADS_LLM_BACKEND=openai` or `ADS_LLM_BACKEND=your-model.gguf` to skip the prompt.
-- First run for that backend: reads PDFs from `data/pdfs`, chunks text, builds embeddings (OpenAI or MiniLM for local), and saves a FAISS index.
-- Later runs: load the existing index for the chosen backend and start the Q&A loop.
-- Type a question and press Enter; type `exit` to quit.
+- Choose backend: **1) OpenAI** (default) or **2) …** one option per file in `models/`.
+- First run: reads PDFs, chunks text, builds embeddings, saves FAISS index.
+- Later runs: loads existing index and starts Q&A loop. Type `exit` to quit.
 
-## Project layout
+## Project Structure
 
-- `App_p1.py` – Backend-agnostic pipeline: PDF load, chunking, FAISS build/load, conversation chain, CLI.
-- `data/pdfs/` – Put your PDFs here.
-- `models/` – Put GGUF (or `.bin`) model files here; each file is offered as an option by its filename.
-- `faiss_index/` – FAISS index for OpenAI embeddings (git-ignored).
-- `faiss_index_llama/` – FAISS index for local models / MiniLM embeddings (git-ignored).
+```
+rag-textbook-qa/
+├── App_p1.py           # RAG pipeline + CLI
+├── web_app.py          # Optional web frontend
+├── data/pdfs/          # Textbook PDFs
+├── models/             # Local GGUF models
+├── faiss_index/        # OpenAI embeddings index (git-ignored)
+└── requirements.txt
+```
 
-## How it works
+## How It Works
 
-1. **Backend** – Default is OpenAI. Local options are discovered from `models/` by filename (no separate logic per model type).
-2. **PDFs** → `load_pdfs()` reads all `.pdf` files and extracts text per page.
-3. **Chunks** → `make_chunks()` splits text with `CharacterTextSplitter` (size 500, overlap 80).
-4. **Index** – Chunks are embedded (OpenAI for `openai`, MiniLM for any local file) and stored in a FAISS index (one index for OpenAI, one for all local models).
-5. **Q&A** – Each question is embedded, top-k chunks are retrieved, and the selected LLM (GPT or LlamaCpp) answers using only that context.
+1. **Backend** — OpenAI default; local options discovered from `models/` by filename
+2. **PDFs** → `load_pdfs()` extracts text per page
+3. **Chunks** → `CharacterTextSplitter` (size 500, overlap 80)
+4. **Index** — Embeddings stored in FAISS (OpenAI or MiniLM)
+5. **Q&A** — Top-k retrieval + LLM answer grounded in context
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*Originally developed as USC DSCI 560 coursework — refactored for clarity and portfolio presentation.*
